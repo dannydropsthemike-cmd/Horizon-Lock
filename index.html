@@ -570,13 +570,6 @@
     </button>
   </div>
 
-  <!-- Permission Banner -->
-  <div class="perm-banner" id="permBanner">
-    <h3>Camera Access Required</h3>
-    <p>Horizon Lock uses your camera and motion sensors<br>to stabilize your video in real-time.</p>
-    <button class="perm-btn" onclick="requestPermissions()">ALLOW ACCESS</button>
-  </div>
-
   <div class="toast" id="toast"></div>
 
   <script>
@@ -626,16 +619,13 @@
 
     // ─── Orientation ─────────────────────────────────────────────────────────────
     function handleOrientation(e) {
-      // e.gamma = roll (left/right tilt), e.beta = pitch (front/back)
       const raw = e.gamma ?? 0;
       currentPitch = e.beta ?? 0;
       currentAlpha = e.alpha ?? 0;
       currentRoll = raw;
 
-      // Smooth
       smoothRoll += (currentRoll - smoothRoll) * SMOOTH;
 
-      // Update data cards
       rollVal.textContent = currentRoll.toFixed(1) + '°';
       pitchVal.textContent = currentPitch.toFixed(1) + '°';
       tiltVal.textContent = currentAlpha.toFixed(1) + '°';
@@ -643,56 +633,101 @@
       const absRoll = Math.abs(currentRoll);
       rollVal.className = 'data-value' + (absRoll < 3 ? ' active' : absRoll > 15 ? ' warn' : '');
 
-      // Update horizon line position when locked
       if (horizonLocked) {
-        const maxShift = 40; // % from center
+        const maxShift = 40;
         const shift = Math.max(-maxShift, Math.min(maxShift, currentRoll / 45 * maxShift));
         horizonLine.style.top = `${50 + shift}%`;
         rollIndicator.textContent = `ROLL ${currentRoll.toFixed(1)}°`;
       }
     }
 
-    async function startOrientation() {
+    function startOrientationListener() {
+      window.addEventListener('deviceorientation', handleOrientation, true);
+    }
+
+    async function requestOrientationPermission() {
       if (typeof DeviceOrientationEvent !== 'undefined' &&
           typeof DeviceOrientationEvent.requestPermission === 'function') {
         try {
           const perm = await DeviceOrientationEvent.requestPermission();
-          if (perm === 'granted') {
-            window.addEventListener('deviceorientation', handleOrientation);
-          }
-        } catch(e) {}
+          if (perm === 'granted') startOrientationListener();
+        } catch(e) {
+          // Permission denied or error — gyro won't work but camera still can
+        }
       } else {
-        window.addEventListener('deviceorientation', handleOrientation);
+        startOrientationListener();
       }
     }
 
     // ─── Camera ──────────────────────────────────────────────────────────────────
+    // IMPORTANT: on iOS, getUserMedia MUST be called synchronously inside a
+    // user-gesture handler (onclick). Any await before it breaks the gesture chain.
     async function startCamera() {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-          audio: true
-        });
-        video.srcObject = stream;
-        await video.play();
-
-        video.style.display = horizonLocked ? 'none' : 'block';
-        canvas.style.display = horizonLocked ? 'block' : 'none';
-        placeholder.style.display = 'none';
-
-        canvas.width = video.videoWidth || 1280;
-        canvas.height = video.videoHeight || 720;
-
-        cameraActive = true;
-        mainBtnText.textContent = 'START RECORDING';
-        mainBtnIcon.innerHTML = `<circle cx="12" cy="12" r="8" fill="currentColor"/>`;
-        showToast('Camera active — enable Horizon Lock');
-
-        startOrientation();
-        renderLoop();
-      } catch(e) {
-        showToast('Camera access denied');
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        showToast('Camera API not supported — use Safari on iOS');
+        return;
       }
+
+      // Try rear camera first; fall back to any camera
+      const constraints = [
+        { video: { facingMode: { exact: 'environment' } }, audio: false },
+        { video: { facingMode: 'environment' }, audio: false },
+        { video: true, audio: false }
+      ];
+
+      let gotStream = null;
+      let lastErr = null;
+
+      for (const c of constraints) {
+        try {
+          gotStream = await navigator.mediaDevices.getUserMedia(c);
+          break;
+        } catch(e) {
+          lastErr = e;
+        }
+      }
+
+      if (!gotStream) {
+        // Give a specific, actionable error message
+        const name = lastErr?.name || '';
+        if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+          showToast('Blocked — go to Settings → Safari → Camera → Allow');
+        } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+          showToast('No camera found on this device');
+        } else if (name === 'NotReadableError') {
+          showToast('Camera in use by another app — close it and retry');
+        } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+          showToast('Requires HTTPS — host on GitHub Pages');
+        } else {
+          showToast('Camera error: ' + (lastErr?.message || 'unknown'));
+        }
+        return;
+      }
+
+      stream = gotStream;
+      video.srcObject = stream;
+
+      // iOS requires the video element to be visible before play() works
+      video.style.display = 'block';
+      placeholder.style.display = 'none';
+
+      try {
+        await video.play();
+      } catch(e) {
+        // Autoplay blocked — user will see the paused frame
+      }
+
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
+
+      cameraActive = true;
+      mainBtnText.textContent = 'START RECORDING';
+      mainBtnIcon.innerHTML = `<circle cx="12" cy="12" r="8" fill="currentColor"/>`;
+      showToast('Camera on — enable Horizon Lock');
+
+      // Request orientation permission after camera is confirmed working
+      await requestOrientationPermission();
+      renderLoop();
     }
 
     function stopCamera() {
@@ -833,28 +868,16 @@
     }
 
     // ─── Main button handler ──────────────────────────────────────────────────────
+    // On iOS, startCamera() must be called DIRECTLY from onclick with no awaits
+    // or banners in between — otherwise the browser treats it as non-gesture and blocks camera.
     function handleMainBtn() {
       if (!cameraActive) {
-        // Check if we need permissions (iOS)
-        if (typeof DeviceOrientationEvent !== 'undefined' &&
-            typeof DeviceOrientationEvent.requestPermission === 'function') {
-          permBanner.classList.add('show');
-        } else {
-          startCamera();
-        }
+        startCamera();
       } else if (!isRecording) {
         startRecording();
       } else {
         stopRecording();
       }
-    }
-
-    async function requestPermissions() {
-      permBanner.classList.remove('show');
-      try {
-        await DeviceOrientationEvent.requestPermission();
-      } catch(e) {}
-      startCamera();
     }
   </script>
 </body>
