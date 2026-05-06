@@ -817,24 +817,36 @@
     document.querySelectorAll('.crosshair-h,.crosshair-v').forEach(el => el.style.display = 'none');
 
     // ─── Recording ───────────────────────────────────────────────────────────────
+    // Pick the best supported MIME type — iOS Safari supports mp4/H.264 natively
+    function getBestMimeType() {
+      const candidates = [
+        'video/mp4;codecs=avc1',   // iOS Safari (H.264 in MP4)
+        'video/mp4',               // iOS Safari fallback
+        'video/webm;codecs=vp9',   // Chrome/Firefox
+        'video/webm;codecs=vp8',
+        'video/webm',
+      ];
+      return candidates.find(t => MediaRecorder.isTypeSupported(t)) || '';
+    }
+
     function startRecording() {
       if (!stream) return;
       recordedChunks = [];
-      // Record from canvas if horizon locked, else directly from stream
-      const recordStream = horizonLocked
-        ? canvas.captureStream(30)
-        : stream;
 
-      // Add audio tracks
+      const recordStream = horizonLocked ? canvas.captureStream(30) : stream;
+
+      // Add audio tracks when recording from canvas
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length && horizonLocked) {
         audioTracks.forEach(t => recordStream.addTrack(t));
       }
 
-      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-        ? 'video/webm;codecs=vp9' : 'video/webm';
+      const mimeType = getBestMimeType();
+      // Store the actual mime type used so we save with the right extension
+      mediaRecorder = mimeType
+        ? new MediaRecorder(recordStream, { mimeType })
+        : new MediaRecorder(recordStream);
 
-      mediaRecorder = new MediaRecorder(recordStream, { mimeType });
       mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
       mediaRecorder.onstop = saveRecording;
       mediaRecorder.start(100);
@@ -857,14 +869,20 @@
     }
 
     function saveRecording() {
-      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      // Determine the actual type recorded and use the right extension
+      const type = mediaRecorder.mimeType || '';
+      const isMP4 = type.includes('mp4');
+      const ext = isMP4 ? 'mp4' : 'webm';
+      const blobType = isMP4 ? 'video/mp4' : 'video/webm';
+
+      const blob = new Blob(recordedChunks, { type: blobType });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `horizon-lock-${Date.now()}.webm`;
+      a.download = `horizon-lock-${Date.now()}.${ext}`;
       a.click();
-      URL.revokeObjectURL(url);
-      showToast('Video saved!');
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast(`Saved as .${ext}!`);
     }
 
     // ─── Main button handler ──────────────────────────────────────────────────────
