@@ -198,43 +198,48 @@
     let cameraActive = false, horizonLocked = false, gridVisible = false, isRecording = false;
     let stream = null, animFrame = null, mediaRecorder = null, recordedChunks = [];
     let rawRoll = 0, rawPitch = 0, smoothRoll = 0;
-    const SMOOTH = 0.10;
 
-    // ── Fixed output canvas dimensions (portrait) ─────────────────────────────────
+    // Higher = more responsive to tilt, lower = smoother/slower. 0.20 is a good
+    // balance for hand-held use — similar feel to S26 horizon lock.
+    const SMOOTH = 0.20;
+
+    // ── Fixed output canvas dimensions (portrait 1080p) ───────────────────────────
     const OUT_W = 1080, OUT_H = 1920;
 
     // ── Stabilization scale ───────────────────────────────────────────────────────
     //
-    // We draw the landscape source video onto a portrait canvas (OUT_W × OUT_H).
-    // While doing so we rotate by -roll (to cancel tilt) + 90° (to make portrait).
+    // After rotation, the (possibly rotated) source image must fully cover the
+    // output rectangle. Worst-case coverage radius = circumscribed radius of output.
+    // Available coverage radius = inscribed radius of source = min(srcW,srcH)/2.
     //
-    // For any rotation angle, the rotated SOURCE must fully cover the OUTPUT rect.
-    // The worst case is when the output's CORNER is furthest from center —
-    // i.e., its circumscribed radius = √(OUT_W²+OUT_H²)/2.
+    // STAB_SCALE = √(OUT_W²+OUT_H²) / min(srcW,srcH)  (+ 0.5% safety margin)
     //
-    // The source's largest inscribed circle (what we can safely use after rotation)
-    // has radius = min(srcW, srcH)/2.
+    // e.g. 1920×1080 source → STAB_SCALE ≈ 2.04  (2× zoom, corrects up to ±90°)
     //
-    // Required: STAB_SCALE × min(srcW,srcH)/2  ≥  √(OUT_W²+OUT_H²)/2
-    // → STAB_SCALE = √(OUT_W²+OUT_H²) / min(srcW,srcH)
-    //
-    // iPhone 17 base: 4K stream = 3840×2160
-    //   STAB_SCALE = √(1080²+1920²) / 2160 = √(4852800) / 2160 = 2203.4 / 2160 ≈ 1.020
-    //
-    // This is the fixed zoom, constant for all roll angles — no wobble, no dynamic scaling.
-    //
-    let STAB_SCALE = 1.02; // placeholder; recomputed from real stream dims
+    let STAB_SCALE = 1.02;   // placeholder; recomputed when real stream dims arrive
+
+    // Set in startCamera() once we know the source dimensions.
+    // Landscape source (vW > vH): needs +90° to display upright in portrait canvas.
+    // Portrait source  (vW ≤ vH): already portrait, no base rotation needed.
+    let portraitRad = Math.PI / 2;
+
+    // requestVideoFrameCallback is available on iOS 15.4+ / Safari 15.4+.
+    // It fires ONLY when a new video frame is decoded (≈ camera fps, e.g. 30 Hz),
+    // not at the display refresh rate (60–120 Hz).  Using it cuts wasted draws by
+    // 50–75% vs requestAnimationFrame, which is the primary cause of low framerate.
+    const supportsRVFC = typeof HTMLVideoElement !== 'undefined' &&
+      'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
     function computeScale(srcW, srcH) {
-      const outCircumDiameter = Math.sqrt(OUT_W * OUT_W + OUT_H * OUT_H);
-      const srcInscribedDiameter = Math.min(srcW, srcH);
-      return (outCircumDiameter / srcInscribedDiameter) * 1.005; // 0.5% safety margin
+      const outCircum = Math.sqrt(OUT_W * OUT_W + OUT_H * OUT_H);
+      return (outCircum / Math.min(srcW, srcH)) * 1.005;  // 0.5 % safety margin
     }
 
     // ─── DOM ─────────────────────────────────────────────────────────────────────
     const video    = document.getElementById('cameraVideo');
     const canvas   = document.getElementById('outputCanvas');
-    const ctx      = canvas.getContext('2d');
+    // alpha:false lets the compositor skip blending — minor but free perf gain
+    const ctx      = canvas.getContext('2d', { alpha: false });
     const ph       = document.getElementById('placeholder');
     const hOverlay = document.getElementById('horizonOverlay');
     const hLine    = document.getElementById('horizonLine');
@@ -252,7 +257,7 @@
     const btnIcon  = document.getElementById('mainBtnIcon');
     const toastEl  = document.getElementById('toast');
 
-    // Fix canvas size once — never reset it inside the render loop
+    // Fix canvas size once — resizing clears the canvas and breaks recording.
     canvas.width = OUT_W;
     canvas.height = OUT_H;
 
@@ -267,35 +272,33 @@
 
     // ─── Orientation ─────────────────────────────────────────────────────────────
     //
-    // deviceorientation:
-    //   alpha = compass yaw (0-360), beta = pitch (-180..180), gamma = roll (-90..90)
+    // BUG FIX — the previous gravity-vector decomposition:
     //
-    // gamma alone wraps and flips as the phone rotates past ±90°.
-    // Fix: decompose the full rotation matrix to extract a stable gravity vector,
-    // then compute roll from that — continuous across all orientations.
+    //   gx = cos(α)·sin(γ) + sin(α)·sin(β)·cos(γ)
+    //   gy = sin(α)·sin(γ) − cos(α)·sin(β)·cos(γ)
+    //   roll = atan2(gx, gy)
+    //
+    // When the phone is held portrait-upright (β≈90°, γ≈0°) this simplifies to:
+    //   gx ≈ sin(α),  gy ≈ −cos(α)
+    //   roll ≈ atan2(sin(α), −cos(α))   → the COMPASS BEARING, not device tilt!
+    //
+    // So whatever direction you face (e.g. ~160° SE) becomes the "roll", which is
+    // why the canvas immediately snaps to ±160° on activation.
+    //
+    // FIX: use e.gamma directly.
+    //   gamma = rotation around the device's Y-axis (the long/portrait axis).
+    //   In portrait orientation this is exactly left/right tilt — the roll we want.
+    //   Range: −90° (tilted left) … +90° (tilted right).
+    //   No decomposition needed; the browser already provides this value.
     //
     function handleOrientation(e) {
-      const a = (e.alpha ?? 0) * Math.PI / 180;
-      const b = (e.beta  ?? 0) * Math.PI / 180;
-      const g = (e.gamma ?? 0) * Math.PI / 180;
+      rawRoll  = e.gamma ?? 0;   // device roll: −90 left … +90 right
+      rawPitch = e.beta  ?? 0;   // device pitch: forward/back tilt
 
-      // Gravity direction in device frame (from W3C rotation matrix, ZXY order)
-      const gx =  Math.cos(a) * Math.sin(g) + Math.sin(a) * Math.sin(b) * Math.cos(g);
-      const gy =  Math.sin(a) * Math.sin(g) - Math.cos(a) * Math.sin(b) * Math.cos(g);
+      // Exponential moving average — fast to converge, no wrap needed (γ ∈ [−90,90])
+      smoothRoll += (rawRoll - smoothRoll) * SMOOTH;
 
-      // Roll = bearing of gravity in device XY plane — stable, no wrapping
-      const roll = Math.atan2(gx, gy) * 180 / Math.PI;
-
-      rawRoll  = roll;
-      rawPitch = e.beta ?? 0;
-
-      // Smooth with EMA, handling ±180 wrap
-      let diff = rawRoll - smoothRoll;
-      if (diff >  180) diff -= 360;
-      if (diff < -180) diff += 360;
-      smoothRoll += diff * SMOOTH;
-
-      // UI
+      // UI readouts
       rollEl.textContent  = rawRoll.toFixed(1) + '°';
       pitchEl.textContent = rawPitch.toFixed(1) + '°';
       const abs = Math.abs(rawRoll);
@@ -303,13 +306,13 @@
 
       if (horizonLocked) {
         const shift = Math.max(-40, Math.min(40, rawRoll / 90 * 40));
-        hLine.style.top = `${50 + shift}%`;
+        hLine.style.top  = `${50 + shift}%`;
         rollInd.textContent = `ROLL ${rawRoll.toFixed(1)}°`;
       }
     }
 
     function startOrientationListener() {
-      window.addEventListener('deviceorientation', handleOrientation, true);
+      window.addEventListener('deviceorientation', handleOrientation, { passive: true });
     }
 
     async function requestOrientationPermission() {
@@ -331,8 +334,11 @@
         showToast('Camera not supported — use Safari'); return;
       }
 
+      // iPhone 17 base: request 1080p first for best framerate.
+      // The canvas is 1080×1920 so 1080p source → STAB_SCALE ≈ 2.04×; that's fine.
+      // 4K → 2.1 M-pixel canvas makes the GPU work 4× harder for no display benefit.
       const tries = [
-        { video: { facingMode: { exact: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } }, audio: false },
+        { video: { facingMode: { exact: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false },
         { video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false },
         { video: { facingMode: 'environment' }, audio: false },
         { video: true, audio: false }
@@ -362,7 +368,7 @@
       ph.style.display = 'none';
       try { await video.play(); } catch(e) {}
 
-      // Wait for real dimensions
+      // Wait for real dimensions to arrive (crucial — metadata fires asynchronously)
       await new Promise(res => {
         if (video.videoWidth) { res(); return; }
         video.addEventListener('loadedmetadata', res, { once: true });
@@ -370,6 +376,13 @@
 
       const vW = video.videoWidth  || 1920;
       const vH = video.videoHeight || 1080;
+
+      // Auto-detect source orientation.
+      // iOS typically delivers a landscape buffer (vW > vH) even in portrait mode;
+      // we rotate +90° to make it upright. If the browser has already rotated the
+      // buffer (vW ≤ vH) no correction is needed.
+      portraitRad = vW > vH ? Math.PI / 2 : 0;
+
       STAB_SCALE = computeScale(vW, vH);
       zoomEl.textContent = STAB_SCALE.toFixed(3) + 'x';
       zoomEl.className = 'data-value active';
@@ -377,15 +390,16 @@
       cameraActive = true;
       btnText.textContent = 'START RECORDING';
       btnIcon.innerHTML = `<circle cx="12" cy="12" r="8" fill="currentColor"/>`;
-      showToast(`${vW}×${vH} — zoom locked at ${STAB_SCALE.toFixed(2)}×`);
+      const orient = portraitRad ? 'land→port' : 'portrait';
+      showToast(`${vW}×${vH} ${orient} · ${STAB_SCALE.toFixed(2)}× · ${supportsRVFC ? 'rVFC ✓' : 'RAF'}`);
 
       await requestOrientationPermission();
-      renderLoop();
+      scheduleFrame();
     }
 
     function stopCamera() {
       stream?.getTracks().forEach(t => t.stop()); stream = null;
-      cancelAnimationFrame(animFrame); animFrame = null;
+      cancelFrame();
       video.style.display = 'none';
       canvas.style.display = 'none';
       ph.style.display = 'flex';
@@ -400,38 +414,60 @@
 
     // ─── Render loop ─────────────────────────────────────────────────────────────
     //
-    // Each frame draws the landscape camera stream onto the portrait canvas:
+    // Pipeline (when horizon lock is active):
     //
-    //   Step 1: translate to canvas center
-    //   Step 2: rotate by (portraitAngle - smoothRoll)
-    //           portraitAngle = +90° makes landscape video appear upright in portrait
-    //           -smoothRoll counter-rotates to cancel device tilt → horizon stays level
-    //   Step 3: scale by STAB_SCALE (fixed, computed once)
-    //           guarantees no clipping at any roll angle
-    //   Step 4: draw video centered on origin
+    //   1. translate to canvas centre
+    //   2. rotate by (portraitRad − smoothRoll·π/180)
+    //        portraitRad   = +π/2 if source is landscape, else 0
+    //        −smoothRoll   = counter-rotation that cancels device tilt
+    //        net result    = horizon stays level regardless of phone roll
+    //   3. scale by STAB_SCALE — fills canvas at all roll angles, no black bars
+    //   4. drawImage centered on origin
     //
-    // Canvas is NEVER resized — doing so clears it and breaks recording.
+    // imageSmoothingEnabled = false: skips bilinear filtering, a significant GPU
+    // saving on mobile (video already has its own temporal filtering).
     //
-    // Portrait correction: +90° assumes the phone is held right-side-up.
-    // If output appears upside-down, change portraitRad to -Math.PI/2.
-    //
-    const portraitRad = Math.PI / 2;
-
-    function renderLoop() {
-      if (!cameraActive) return;
-      animFrame = requestAnimationFrame(renderLoop);
+    function drawFrame() {
       if (!horizonLocked || video.readyState < 2) return;
-
       const vW = video.videoWidth, vH = video.videoHeight;
       if (!vW || !vH) return;
 
       ctx.save();
       ctx.clearRect(0, 0, OUT_W, OUT_H);
+      ctx.imageSmoothingEnabled = false;   // nearest-neighbour; much faster on mobile
       ctx.translate(OUT_W / 2, OUT_H / 2);
       ctx.rotate(portraitRad - smoothRoll * Math.PI / 180);
       ctx.scale(STAB_SCALE, STAB_SCALE);
       ctx.drawImage(video, -vW / 2, -vH / 2, vW, vH);
       ctx.restore();
+    }
+
+    // scheduleFrame / cancelFrame — use requestVideoFrameCallback when available.
+    // rVFC fires once per decoded video frame (e.g. 30 Hz) rather than once per
+    // display refresh (60–120 Hz), so we never waste GPU time redrawing an
+    // unchanged frame.  Falls back to rAF on older Safari.
+    function scheduleFrame() {
+      if (!cameraActive) return;
+      if (supportsRVFC) {
+        animFrame = video.requestVideoFrameCallback(onFrame);
+      } else {
+        animFrame = requestAnimationFrame(onFrame);
+      }
+    }
+
+    function cancelFrame() {
+      if (animFrame === null) return;
+      if (supportsRVFC) {
+        video.cancelVideoFrameCallback(animFrame);
+      } else {
+        cancelAnimationFrame(animFrame);
+      }
+      animFrame = null;
+    }
+
+    function onFrame() {
+      drawFrame();
+      scheduleFrame();
     }
 
     // ─── Lock toggle ─────────────────────────────────────────────────────────────
