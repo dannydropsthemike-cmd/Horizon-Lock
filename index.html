@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Horizon Lock</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #12121a;
+      --border: rgba(255,255,255,0.07);
+      --accent: #00e5ff;
+      --accent2: #ff6b35;
+      --text: #f0f0f5;
+      --muted: rgba(240,240,245,0.4);
+      --lock-color: #00e5ff;
+      --unlocked-color: #ff6b35;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Background grid */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0,229,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,229,255,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+    }
+
+    /* Glow orbs */
+    .orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(80px);
+      pointer-events: none;
+      opacity: 0.25;
+    }
+    .orb1 { width: 300px; height: 300px; background: var(--accent); top: -80px; right: -80px; }
+    .orb2 { width: 250px; height: 250px; background: var(--accent2); bottom: -60px; left: -60px; }
+
+    /* Header */
+    header {
+      width: 100%;
+      padding: 20px 24px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: relative;
+      z-index: 10;
+    }
+
+    .logo {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 100px;
+      background: rgba(0,229,255,0.08);
+      border: 1px solid rgba(0,229,255,0.2);
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      color: var(--accent);
+      transition: all 0.4s ease;
+    }
+    .status-pill.unlocked {
+      background: rgba(255,107,53,0.08);
+      border-color: rgba(255,107,53,0.2);
+      color: var(--unlocked-color);
+    }
+    .status-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: pulse-dot 2s infinite;
+      transition: background 0.4s;
+    }
+    .status-pill.unlocked .status-dot { background: var(--unlocked-color); animation: none; }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* Main viewport area */
+    .viewport {
+      flex: 1;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      position: relative;
+    }
+
+    /* Camera frame */
+    .camera-frame {
+      width: min(340px, 90vw);
+      aspect-ratio: 9/16;
+      max-height: 55dvh;
+      border-radius: 28px;
+      border: 1.5px solid var(--border);
+      background: var(--surface);
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 0 60px rgba(0,229,255,0.06), 0 30px 60px rgba(0,0,0,0.6);
+    }
+
+    /* Live camera feed */
+    #cameraVideo {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      position: absolute;
+      inset: 0;
+      display: none;
+      border-radius: 28px;
+    }
+
+    /* Stabilized output canvas */
+    #outputCanvas {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      position: absolute;
+      inset: 0;
+      display: none;
+      border-radius: 28px;
+    }
+
+    /* No camera placeholder */
+    .camera-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: linear-gradient(160deg, #0e0e18 0%, #12121f 100%);
+    }
+
+    .camera-icon-wrap {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      border: 1.5px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .camera-icon-wrap svg { opacity: 0.3; }
+
+    .camera-placeholder p {
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      font-family: 'DM Mono', monospace;
+      text-align: center;
+      padding: 0 24px;
+      line-height: 1.6;
+    }
+
+    /* Horizon line overlay */
+    .horizon-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      transition: opacity 0.4s;
+      opacity: 0;
+    }
+    .horizon-overlay.active { opacity: 1; }
+
+    .horizon-line {
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      top: 50%;
+      transform: translateY(-50%);
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent) 20%, var(--accent) 80%, transparent);
+      transition: top 0.1s ease-out, transform 0.1s ease-out;
+    }
+
+    .horizon-line::before,
+    .horizon-line::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .horizon-line::before { left: 0; }
+    .horizon-line::after { right: 0; }
+
+    .horizon-center {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 20px;
+      height: 20px;
+      border: 1.5px solid var(--accent);
+      border-radius: 50%;
+    }
+
+    /* Grid crosshair */
+    .crosshair-h, .crosshair-v {
+      position: absolute;
+      background: rgba(0,229,255,0.15);
+    }
+    .crosshair-h { left: 10%; right: 10%; top: 50%; height: 1px; margin-top: -0.5px; }
+    .crosshair-v { top: 10%; bottom: 10%; left: 50%; width: 1px; margin-left: -0.5px; }
+
+    /* Corner brackets */
+    .bracket {
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      border-color: rgba(0,229,255,0.4);
+      border-style: solid;
+    }
+    .bracket.tl { top: 16px; left: 16px; border-width: 1.5px 0 0 1.5px; }
+    .bracket.tr { top: 16px; right: 16px; border-width: 1.5px 1.5px 0 0; }
+    .bracket.bl { bottom: 16px; left: 16px; border-width: 0 0 1.5px 1.5px; }
+    .bracket.br { bottom: 16px; right: 16px; border-width: 0 1.5px 1.5px 0; }
+
+    /* Roll indicator */
+    .roll-indicator {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      color: var(--accent);
+      letter-spacing: 0.1em;
+      background: rgba(0,0,0,0.5);
+      padding: 4px 10px;
+      border-radius: 6px;
+      opacity: 0;
+      transition: opacity 0.4s;
+    }
+    .horizon-overlay.active .roll-indicator { opacity: 1; }
+
+    /* REC badge */
+    .rec-badge {
+      position: absolute;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      color: #ff3b3b;
+      opacity: 0;
+      transition: opacity 0.4s;
+    }
+    .rec-badge.active { opacity: 1; }
+    .rec-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #ff3b3b;
+      animation: blink 1s infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+    /* Data readout */
+    .data-readout {
+      width: min(340px, 90vw);
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+
+    .data-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 10px;
+      text-align: center;
+    }
+
+    .data-label {
+      font-family: 'DM Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.14em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .data-value {
+      font-family: 'DM Mono', monospace;
+      font-size: 18px;
+      font-weight: 300;
+      color: var(--text);
+      transition: color 0.3s;
+      line-height: 1;
+    }
+
+    .data-value.active { color: var(--accent); }
+    .data-value.warn { color: var(--accent2); }
+    .data-unit {
+      font-size: 10px;
+      color: var(--muted);
+      margin-left: 2px;
+    }
+
+    /* Controls */
+    .controls {
+      width: 100%;
+      padding: 16px 24px 32px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .toggle-row {
+      display: flex;
+      gap: 10px;
+      width: min(340px, 90vw);
+    }
+
+    .btn {
+      flex: 1;
+      padding: 14px 10px;
+      border-radius: 16px;
+      border: 1.5px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      font-family: 'Syne', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+    }
+
+    .btn:active { transform: scale(0.96); }
+
+    .btn.primary {
+      background: rgba(0,229,255,0.1);
+      border-color: rgba(0,229,255,0.35);
+      color: var(--accent);
+    }
+    .btn.primary.on {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #000;
+      box-shadow: 0 0 24px rgba(0,229,255,0.35);
+    }
+
+    .btn.secondary { font-size: 12px; }
+    .btn.secondary.on {
+      background: rgba(255,107,53,0.1);
+      border-color: rgba(255,107,53,0.3);
+      color: var(--accent2);
+    }
+
+    .main-btn {
+      width: min(340px, 90vw);
+      padding: 18px;
+      border-radius: 20px;
+      border: none;
+      background: linear-gradient(135deg, #00e5ff, #0099cc);
+      color: #000;
+      font-family: 'Syne', sans-serif;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      box-shadow: 0 8px 30px rgba(0,229,255,0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .main-btn:active { transform: scale(0.97); box-shadow: 0 4px 16px rgba(0,229,255,0.2); }
+    .main-btn.recording {
+      background: linear-gradient(135deg, #ff3b3b, #cc0000);
+      box-shadow: 0 8px 30px rgba(255,59,59,0.3);
+    }
+
+    /* Permission banner */
+    .perm-banner {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: rgba(12,12,20,0.95);
+      backdrop-filter: blur(16px);
+      border-top: 1px solid var(--border);
+      padding: 20px 24px 36px;
+      text-align: center;
+      z-index: 100;
+      transform: translateY(100%);
+      transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .perm-banner.show { transform: translateY(0); }
+    .perm-banner h3 { font-size: 16px; margin-bottom: 6px; }
+    .perm-banner p { font-size: 12px; color: var(--muted); font-family: 'DM Mono', monospace; line-height: 1.6; margin-bottom: 16px; }
+    .perm-btn {
+      width: 100%;
+      padding: 15px;
+      border-radius: 14px;
+      border: none;
+      background: var(--accent);
+      color: #000;
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      top: 80px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      background: rgba(30,30,40,0.95);
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      padding: 10px 20px;
+      font-family: 'DM Mono', monospace;
+      font-size: 12px;
+      color: var(--text);
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.3s ease;
+      white-space: nowrap;
+      z-index: 200;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+
+  <div class="orb orb1"></div>
+  <div class="orb orb2"></div>
+
+  <header>
+    <div class="logo">Horizon Lock</div>
+    <div class="status-pill unlocked" id="statusPill">
+      <div class="status-dot"></div>
+      <span id="statusText">UNLOCKED</span>
+    </div>
+  </header>
+
+  <div class="viewport">
+    <div class="camera-frame" id="cameraFrame">
+
+      <!-- Placeholder -->
+      <div class="camera-placeholder" id="placeholder">
+        <div class="camera-icon-wrap">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.5">
+            <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+            <circle cx="12" cy="13" r="4"/>
+          </svg>
+        </div>
+        <p>Tap START CAMERA<br>to enable Horizon Lock</p>
+      </div>
+
+      <!-- Camera video -->
+      <video id="cameraVideo" autoplay muted playsinline></video>
+
+      <!-- Stabilized canvas output -->
+      <canvas id="outputCanvas"></canvas>
+
+      <!-- Horizon overlay (shows when locked) -->
+      <div class="horizon-overlay" id="horizonOverlay">
+        <div class="crosshair-h"></div>
+        <div class="crosshair-v"></div>
+        <div class="bracket tl"></div>
+        <div class="bracket tr"></div>
+        <div class="bracket bl"></div>
+        <div class="bracket br"></div>
+        <div class="horizon-line" id="horizonLine"></div>
+        <div class="horizon-center"></div>
+        <div class="roll-indicator" id="rollIndicator">ROLL 0.0°</div>
+      </div>
+
+      <!-- REC badge -->
+      <div class="rec-badge" id="recBadge">
+        <div class="rec-dot"></div>REC
+      </div>
+
+    </div>
+
+    <!-- Data readout -->
+    <div class="data-readout">
+      <div class="data-card">
+        <div class="data-label">Roll</div>
+        <div class="data-value" id="rollVal">—<span class="data-unit">°</span></div>
+      </div>
+      <div class="data-card">
+        <div class="data-label">Pitch</div>
+        <div class="data-value" id="pitchVal">—<span class="data-unit">°</span></div>
+      </div>
+      <div class="data-card">
+        <div class="data-label">Tilt</div>
+        <div class="data-value" id="tiltVal">—<span class="data-unit">°</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="toggle-row">
+      <button class="btn primary" id="lockBtn" onclick="toggleHorizonLock()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0110 0v4"/>
+        </svg>
+        HORIZON LOCK
+      </button>
+      <button class="btn secondary" id="gridBtn" onclick="toggleGrid()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/>
+        </svg>
+        GRID
+      </button>
+    </div>
+    <button class="main-btn" id="mainBtn" onclick="handleMainBtn()">
+      <svg id="mainBtnIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+      </svg>
+      <span id="mainBtnText">START CAMERA</span>
+    </button>
+  </div>
+
+  <!-- Permission Banner -->
+  <div class="perm-banner" id="permBanner">
+    <h3>Camera Access Required</h3>
+    <p>Horizon Lock uses your camera and motion sensors<br>to stabilize your video in real-time.</p>
+    <button class="perm-btn" onclick="requestPermissions()">ALLOW ACCESS</button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // ─── State ───────────────────────────────────────────────────────────────────
+    let cameraActive = false;
+    let horizonLocked = false;
+    let gridVisible = false;
+    let isRecording = false;
+    let stream = null;
+    let animFrame = null;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+
+    // Gyro / orientation data
+    let currentRoll = 0, currentPitch = 0, currentAlpha = 0;
+    let smoothRoll = 0;
+    const SMOOTH = 0.15;
+
+    // DOM refs
+    const video = document.getElementById('cameraVideo');
+    const canvas = document.getElementById('outputCanvas');
+    const ctx = canvas.getContext('2d');
+    const placeholder = document.getElementById('placeholder');
+    const horizonOverlay = document.getElementById('horizonOverlay');
+    const horizonLine = document.getElementById('horizonLine');
+    const rollIndicator = document.getElementById('rollIndicator');
+    const recBadge = document.getElementById('recBadge');
+    const statusPill = document.getElementById('statusPill');
+    const statusText = document.getElementById('statusText');
+    const rollVal = document.getElementById('rollVal');
+    const pitchVal = document.getElementById('pitchVal');
+    const tiltVal = document.getElementById('tiltVal');
+    const lockBtn = document.getElementById('lockBtn');
+    const gridBtn = document.getElementById('gridBtn');
+    const mainBtn = document.getElementById('mainBtn');
+    const mainBtnText = document.getElementById('mainBtnText');
+    const mainBtnIcon = document.getElementById('mainBtnIcon');
+    const permBanner = document.getElementById('permBanner');
+    const toastEl = document.getElementById('toast');
+
+    // ─── Toast ───────────────────────────────────────────────────────────────────
+    function showToast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      setTimeout(() => toastEl.classList.remove('show'), 2200);
+    }
+
+    // ─── Orientation ─────────────────────────────────────────────────────────────
+    function handleOrientation(e) {
+      // e.gamma = roll (left/right tilt), e.beta = pitch (front/back)
+      const raw = e.gamma ?? 0;
+      currentPitch = e.beta ?? 0;
+      currentAlpha = e.alpha ?? 0;
+      currentRoll = raw;
+
+      // Smooth
+      smoothRoll += (currentRoll - smoothRoll) * SMOOTH;
+
+      // Update data cards
+      rollVal.textContent = currentRoll.toFixed(1) + '°';
+      pitchVal.textContent = currentPitch.toFixed(1) + '°';
+      tiltVal.textContent = currentAlpha.toFixed(1) + '°';
+
+      const absRoll = Math.abs(currentRoll);
+      rollVal.className = 'data-value' + (absRoll < 3 ? ' active' : absRoll > 15 ? ' warn' : '');
+
+      // Update horizon line position when locked
+      if (horizonLocked) {
+        const maxShift = 40; // % from center
+        const shift = Math.max(-maxShift, Math.min(maxShift, currentRoll / 45 * maxShift));
+        horizonLine.style.top = `${50 + shift}%`;
+        rollIndicator.textContent = `ROLL ${currentRoll.toFixed(1)}°`;
+      }
+    }
+
+    async function startOrientation() {
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        try {
+          const perm = await DeviceOrientationEvent.requestPermission();
+          if (perm === 'granted') {
+            window.addEventListener('deviceorientation', handleOrientation);
+          }
+        } catch(e) {}
+      } else {
+        window.addEventListener('deviceorientation', handleOrientation);
+      }
+    }
+
+    // ─── Camera ──────────────────────────────────────────────────────────────────
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: true
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        video.style.display = horizonLocked ? 'none' : 'block';
+        canvas.style.display = horizonLocked ? 'block' : 'none';
+        placeholder.style.display = 'none';
+
+        canvas.width = video.videoWidth || 1280;
+        canvas.height = video.videoHeight || 720;
+
+        cameraActive = true;
+        mainBtnText.textContent = 'START RECORDING';
+        mainBtnIcon.innerHTML = `<circle cx="12" cy="12" r="8" fill="currentColor"/>`;
+        showToast('Camera active — enable Horizon Lock');
+
+        startOrientation();
+        renderLoop();
+      } catch(e) {
+        showToast('Camera access denied');
+      }
+    }
+
+    function stopCamera() {
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+      video.style.display = 'none';
+      canvas.style.display = 'none';
+      placeholder.style.display = 'flex';
+      cameraActive = false;
+      horizonLocked = false;
+      isRecording = false;
+      updateLockUI();
+      recBadge.classList.remove('active');
+      mainBtnText.textContent = 'START CAMERA';
+      mainBtnIcon.innerHTML = `<polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>`;
+      mainBtn.classList.remove('recording');
+    }
+
+    // ─── Render loop (stabilization) ─────────────────────────────────────────────
+    function renderLoop() {
+      if (!cameraActive) return;
+      animFrame = requestAnimationFrame(renderLoop);
+
+      if (!horizonLocked) return;
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const angle = (-smoothRoll * Math.PI) / 180;
+
+      // Scale up slightly to hide black edges during rotation
+      const scale = 1 + Math.abs(smoothRoll) * 0.012;
+
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+      ctx.scale(scale, scale);
+      ctx.drawImage(video, -cx, -cy, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    // ─── Horizon Lock toggle ──────────────────────────────────────────────────────
+    function toggleHorizonLock() {
+      if (!cameraActive) { showToast('Start camera first'); return; }
+      horizonLocked = !horizonLocked;
+      updateLockUI();
+
+      if (horizonLocked) {
+        video.style.display = 'none';
+        canvas.style.display = 'block';
+        showToast('Horizon locked ⬤');
+      } else {
+        canvas.style.display = 'none';
+        video.style.display = 'block';
+        horizonLine.style.top = '50%';
+        showToast('Horizon unlocked');
+      }
+    }
+
+    function updateLockUI() {
+      if (horizonLocked) {
+        lockBtn.classList.add('on');
+        horizonOverlay.classList.add('active');
+        statusPill.classList.remove('unlocked');
+        statusText.textContent = 'LOCKED';
+      } else {
+        lockBtn.classList.remove('on');
+        horizonOverlay.classList.remove('active');
+        statusPill.classList.add('unlocked');
+        statusText.textContent = 'UNLOCKED';
+      }
+    }
+
+    // ─── Grid toggle ─────────────────────────────────────────────────────────────
+    function toggleGrid() {
+      gridVisible = !gridVisible;
+      gridBtn.classList.toggle('on', gridVisible);
+      document.querySelectorAll('.crosshair-h,.crosshair-v').forEach(el => {
+        el.style.display = gridVisible ? 'block' : 'none';
+      });
+      showToast(gridVisible ? 'Grid on' : 'Grid off');
+    }
+    // Hide grid elements initially
+    document.querySelectorAll('.crosshair-h,.crosshair-v').forEach(el => el.style.display = 'none');
+
+    // ─── Recording ───────────────────────────────────────────────────────────────
+    function startRecording() {
+      if (!stream) return;
+      recordedChunks = [];
+      // Record from canvas if horizon locked, else directly from stream
+      const recordStream = horizonLocked
+        ? canvas.captureStream(30)
+        : stream;
+
+      // Add audio tracks
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length && horizonLocked) {
+        audioTracks.forEach(t => recordStream.addTrack(t));
+      }
+
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+        ? 'video/webm;codecs=vp9' : 'video/webm';
+
+      mediaRecorder = new MediaRecorder(recordStream, { mimeType });
+      mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.onstop = saveRecording;
+      mediaRecorder.start(100);
+
+      isRecording = true;
+      recBadge.classList.add('active');
+      mainBtn.classList.add('recording');
+      mainBtnText.textContent = 'STOP RECORDING';
+      mainBtnIcon.innerHTML = `<rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor"/>`;
+      showToast('Recording started');
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+      isRecording = false;
+      recBadge.classList.remove('active');
+      mainBtn.classList.remove('recording');
+      mainBtnText.textContent = 'START RECORDING';
+      mainBtnIcon.innerHTML = `<circle cx="12" cy="12" r="8" fill="currentColor"/>`;
+    }
+
+    function saveRecording() {
+      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `horizon-lock-${Date.now()}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Video saved!');
+    }
+
+    // ─── Main button handler ──────────────────────────────────────────────────────
+    function handleMainBtn() {
+      if (!cameraActive) {
+        // Check if we need permissions (iOS)
+        if (typeof DeviceOrientationEvent !== 'undefined' &&
+            typeof DeviceOrientationEvent.requestPermission === 'function') {
+          permBanner.classList.add('show');
+        } else {
+          startCamera();
+        }
+      } else if (!isRecording) {
+        startRecording();
+      } else {
+        stopRecording();
+      }
+    }
+
+    async function requestPermissions() {
+      permBanner.classList.remove('show');
+      try {
+        await DeviceOrientationEvent.requestPermission();
+      } catch(e) {}
+      startCamera();
+    }
+  </script>
+</body>
+</html>
